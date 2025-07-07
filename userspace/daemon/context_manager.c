@@ -9,6 +9,7 @@
 #include <pwd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <json-c/json.h>
 
 #define MAX_PATH_SIZE 1024
 #define MAX_HISTORY_ENTRIES 50
@@ -113,4 +114,53 @@ int ai_context_add_command(ai_context_t *ctx, const char *command) {
     ctx->command_count++;
     
     return 0;
+}
+
+// Update all context fields (refresh)
+int ai_context_update(ai_context_t *ctx) {
+    if (!ctx) return -1;
+    get_current_directory(ctx);
+    get_user_info(ctx);
+    get_hostname(ctx);
+    ctx->last_update = time(NULL);
+    return 0;
+}
+
+// Check if context needs refresh (older than 5 seconds)
+int ai_context_needs_refresh(ai_context_t *ctx) {
+    if (!ctx) return 1;
+    time_t now = time(NULL);
+    return (now - ctx->last_update) > 5;
+}
+
+// Convert context to JSON string (caller must free)
+char *ai_context_to_json(const ai_context_t *ctx) {
+    if (!ctx) return NULL;
+    json_object *obj = json_object_new_object();
+    json_object_object_add(obj, "current_directory", json_object_new_string(ctx->current_directory));
+    json_object_object_add(obj, "username", json_object_new_string(ctx->username));
+    json_object_object_add(obj, "shell", json_object_new_string(ctx->shell));
+    json_object_object_add(obj, "hostname", json_object_new_string(ctx->hostname));
+    json_object_object_add(obj, "git_branch", json_object_new_string(ctx->git_branch));
+    json_object_object_add(obj, "git_status", json_object_new_string(ctx->git_status));
+    json_object_object_add(obj, "file_listing", json_object_new_string(ctx->file_listing));
+    json_object_object_add(obj, "system_info", json_object_new_string(ctx->system_info));
+    json_object_object_add(obj, "process_id", json_object_new_int(ctx->process_id));
+    json_object_object_add(obj, "user_id", json_object_new_int(ctx->user_id));
+    json_object_object_add(obj, "last_update", json_object_new_int((int)ctx->last_update));
+    // Add recent commands as array
+    json_object *cmds = json_object_new_array();
+    for (int i = 0; i < ctx->command_count; ++i) {
+        json_object_array_add(cmds, json_object_new_string(ctx->recent_commands[i]));
+    }
+    json_object_object_add(obj, "recent_commands", cmds);
+    char *json_str = strdup(json_object_to_json_string(obj));
+    json_object_put(obj);
+    return json_str;
+}
+
+// Free any dynamically allocated fields (none currently, stub for future)
+void ai_context_free(ai_context_t *ctx) {
+    (void)ctx;
+    // No dynamic allocations yet
 }
