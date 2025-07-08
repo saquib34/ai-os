@@ -11,17 +11,44 @@
  #include <sys/un.h>
  #include <json-c/json.h>
  #include <errno.h>
+ #include <sys/stat.h>
+ #include <stdarg.h>
+ #include "../ai_os_common.h"
  
  #define AI_SOCKET_PATH "/var/run/ai-os.sock"
  #define MAX_RESPONSE_SIZE 8192
  
- /* Client connection structure */
- typedef struct {
-     int socket_fd;
-     int connected;
- } ai_client_t;
+ #define AI_CLIENT_LOG_FILE "/var/log/ai-os/ai_client.log"
  
- static ai_client_t g_client = {-1, 0};
+ /* Logging utility */
+ static FILE *log_file = NULL;
+ static void ai_client_log(const char *fmt, ...) {
+     va_list args;
+     if (!log_file) {
+         log_file = fopen(AI_CLIENT_LOG_FILE, "a");
+         if (!log_file) log_file = stderr;
+     }
+     va_start(args, fmt);
+     vfprintf(log_file, fmt, args);
+     fflush(log_file);
+     va_end(args);
+ }
+ 
+ // TODO: Add reconnection and exponential backoff logic for transient failures
+ // TODO: Add timeouts for send/recv to avoid indefinite blocking
+ // TODO: Add mutex protection for g_client if used from multiple threads
+ 
+ /* Client connection structure */
+ 
+ // Replace ai_client_t with ai_client_state_t for the local client connection struct
+ // Define the local struct:
+typedef struct {
+    int socket_fd;
+    int connected;
+} ai_client_state_t;
+
+// Update the global client instance
+static ai_client_state_t g_client = {-1, 0};
  
  /* Connect to AI daemon */
  int ai_client_connect(void) {
@@ -34,7 +61,7 @@
      /* Create socket */
      g_client.socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
      if (g_client.socket_fd < 0) {
-         fprintf(stderr, "AI-Client: Failed to create socket: %s\n", strerror(errno));
+         ai_client_log("AI-Client: Failed to create socket: %s\n", strerror(errno));
          return -1;
      }
      
@@ -44,7 +71,7 @@
      strncpy(addr.sun_path, AI_SOCKET_PATH, sizeof(addr.sun_path) - 1);
      
      if (connect(g_client.socket_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-         fprintf(stderr, "AI-Client: Failed to connect to daemon: %s\n", strerror(errno));
+         ai_client_log("AI-Client: Failed to connect to daemon: %s\n", strerror(errno));
          close(g_client.socket_fd);
          g_client.socket_fd = -1;
          return -1;
@@ -57,7 +84,9 @@
  /* Disconnect from AI daemon */
  void ai_client_disconnect(void) {
      if (g_client.connected && g_client.socket_fd >= 0) {
-         close(g_client.socket_fd);
+         if (close(g_client.socket_fd) != 0) {
+             ai_client_log("AI-Client: Failed to close socket: %s\n", strerror(errno));
+         }
          g_client.socket_fd = -1;
          g_client.connected = 0;
      }
@@ -74,7 +103,7 @@
      /* Send request */
      ssize_t bytes_sent = send(g_client.socket_fd, request, strlen(request), 0);
      if (bytes_sent < 0) {
-         fprintf(stderr, "AI-Client: Failed to send request: %s\n", strerror(errno));
+         ai_client_log("AI-Client: Failed to send request: %s\n", strerror(errno));
          ai_client_disconnect();
          return -1;
      }
@@ -82,7 +111,7 @@
      /* Receive response */
      ssize_t bytes_received = recv(g_client.socket_fd, response, response_size - 1, 0);
      if (bytes_received < 0) {
-         fprintf(stderr, "AI-Client: Failed to receive response: %s\n", strerror(errno));
+         ai_client_log("AI-Client: Failed to receive response: %s\n", strerror(errno));
          ai_client_disconnect();
          return -1;
      }
@@ -120,7 +149,7 @@
      /* Parse response */
      json_object *response_obj = json_tokener_parse(response);
      if (!response_obj) {
-         fprintf(stderr, "AI-Client: Invalid JSON response\n");
+         ai_client_log("AI-Client: Invalid JSON response\n");
          return -1;
      }
      

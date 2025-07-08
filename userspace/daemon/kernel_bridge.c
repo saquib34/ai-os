@@ -16,6 +16,9 @@
  #include <pthread.h>
  #include <errno.h>
  #include <signal.h>
+ #include <sys/stat.h>
+ #include <stdarg.h>
+ #include "../ai_os_common.h"
  
  /* IOCTL definitions for kernel communication */
  #define AI_OS_MAGIC 'A'
@@ -25,42 +28,6 @@
  #define AI_OS_SET_CONFIG _IOW(AI_OS_MAGIC, 4, struct ai_os_config)
  #define AI_OS_GET_REQUEST _IOR(AI_OS_MAGIC, 5, struct ai_os_request)
  #define AI_OS_SEND_RESPONSE _IOW(AI_OS_MAGIC, 6, struct ai_os_response)
- 
- /* Shared structures between kernel and userspace */
- struct ai_os_status {
-     int enabled;
-     int debug_mode;
-     int active_contexts;
-     int active_requests;
-     unsigned long long total_requests;
-     unsigned long long successful_interpretations;
-     unsigned long long failed_interpretations;
-     unsigned long long blocked_commands;
- };
- 
- struct ai_os_config {
-     int enabled;
-     int debug_mode;
-     int safety_mode;
-     int confirmation_required;
-     char model_name[64];
- };
- 
- struct ai_os_request {
-     int request_id;
-     pid_t pid;
-     uid_t uid;
-     char command[1024];
-     char context[2048];
-     unsigned long timestamp;
- };
- 
- struct ai_os_response {
-     int request_id;
-     int result_code;
-     char interpreted_command[1024];
-     char error_message[256];
- };
  
  /* Bridge state */
  static struct {
@@ -75,16 +42,30 @@
  extern int ollama_interpret_command(const char *natural_command, const char *context, 
                                     char *shell_command, size_t command_size);
  
+ /* Logging utility */
+static FILE *log_file = NULL;
+static void kernel_bridge_log(const char *fmt, ...) {
+    va_list args;
+    if (!log_file) {
+        log_file = fopen("/var/log/ai-os/kernel_bridge.log", "a");
+        if (!log_file) log_file = stderr;
+    }
+    va_start(args, fmt);
+    vfprintf(log_file, fmt, args);
+    fflush(log_file);
+    va_end(args);
+}
+ 
  /* Initialize kernel communication */
  int kernel_bridge_init(void) {
      /* Open kernel device */
      bridge_state.kernel_fd = open("/proc/ai_os", O_RDWR);
      if (bridge_state.kernel_fd < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to open kernel interface: %s\n", strerror(errno));
+         kernel_bridge_log("Kernel Bridge: Failed to open kernel interface: %s\n", strerror(errno));
          return -1;
      }
      
-     printf("Kernel Bridge: Initialized communication with kernel module\n");
+     kernel_bridge_log("Kernel Bridge: Initialized communication with kernel module\n");
      return 0;
  }
  
@@ -139,6 +120,7 @@
  /* Enable/disable kernel module */
  int kernel_bridge_set_enabled(int enabled) {
      if (bridge_state.kernel_fd < 0) {
+         kernel_bridge_log("Kernel Bridge: set_enabled called with invalid fd\n");
          return -1;
      }
      
@@ -146,18 +128,19 @@
      ssize_t bytes_written = write(bridge_state.kernel_fd, cmd, strlen(cmd));
      
      if (bytes_written < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to %s module: %s\n", 
+         kernel_bridge_log("Kernel Bridge: Failed to %s module: %s\n", 
                  cmd, strerror(errno));
          return -1;
      }
      
-     printf("Kernel Bridge: Module %s\n", enabled ? "enabled" : "disabled");
+     kernel_bridge_log("Kernel Bridge: Module %s\n", enabled ? "enabled" : "disabled");
      return 0;
  }
  
  /* Set debug mode */
  int kernel_bridge_set_debug(int debug_on) {
      if (bridge_state.kernel_fd < 0) {
+         kernel_bridge_log("Kernel Bridge: set_debug called with invalid fd\n");
          return -1;
      }
      
@@ -165,12 +148,12 @@
      ssize_t bytes_written = write(bridge_state.kernel_fd, cmd, strlen(cmd));
      
      if (bytes_written < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to set debug mode: %s\n", 
+         kernel_bridge_log("Kernel Bridge: Failed to set debug mode: %s\n", 
                  strerror(errno));
          return -1;
      }
      
-     printf("Kernel Bridge: Debug mode %s\n", debug_on ? "enabled" : "disabled");
+     kernel_bridge_log("Kernel Bridge: Debug mode %s\n", debug_on ? "enabled" : "disabled");
      return 0;
  }
  
@@ -180,7 +163,7 @@
      char interpreted_command[1024];
      int result;
      
-     printf("Kernel Bridge: Processing request %d from PID %d: %s\n", 
+     kernel_bridge_log("Kernel Bridge: Processing request %d from PID %d: %s\n", 
             request->request_id, request->pid, request->command);
      
      /* Initialize response */
@@ -199,7 +182,7 @@
                  sizeof(response->interpreted_command) - 1);
          response->interpreted_command[sizeof(response->interpreted_command) - 1] = '\0';
          
-         printf("Kernel Bridge: Successfully interpreted: %s -> %s\n", 
+         kernel_bridge_log("Kernel Bridge: Successfully interpreted: %s -> %s\n", 
                 request->command, interpreted_command);
      } else if (result == -2) {
          response->result_code = -2;
@@ -226,7 +209,7 @@
      struct timeval timeout;
      int result;
      
-     printf("Kernel Bridge: Bridge thread started\n");
+     kernel_bridge_log("Kernel Bridge: Bridge thread started\n");
      
      while (bridge_state.running) {
          /* Check for incoming requests from kernel */
@@ -240,7 +223,7 @@
          
          if (result < 0) {
              if (errno == EINTR) continue;
-             fprintf(stderr, "Kernel Bridge: Select error: %s\n", strerror(errno));
+             kernel_bridge_log("Kernel Bridge: Select error: %s\n", strerror(errno));
              break;
          }
          
@@ -267,27 +250,27 @@
          }
      }
      
-     printf("Kernel Bridge: Bridge thread terminated\n");
+     kernel_bridge_log("Kernel Bridge: Bridge thread terminated\n");
      return NULL;
  }
  
  /* Start the kernel bridge */
  int kernel_bridge_start(void) {
      if (bridge_state.kernel_fd < 0) {
-         fprintf(stderr, "Kernel Bridge: Not initialized\n");
+         kernel_bridge_log("Kernel Bridge: Not initialized\n");
          return -1;
      }
      
      bridge_state.running = 1;
      
      if (pthread_create(&bridge_state.bridge_thread, NULL, bridge_thread_func, NULL) != 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to create bridge thread: %s\n", 
+         kernel_bridge_log("Kernel Bridge: Failed to create bridge thread: %s\n", 
                  strerror(errno));
          bridge_state.running = 0;
          return -1;
      }
      
-     printf("Kernel Bridge: Started successfully\n");
+     kernel_bridge_log("Kernel Bridge: Started successfully\n");
      return 0;
  }
  
@@ -297,11 +280,13 @@
          bridge_state.running = 0;
          
          if (bridge_state.bridge_thread) {
-             pthread_join(bridge_state.bridge_thread, NULL);
+             if (pthread_join(bridge_state.bridge_thread, NULL) != 0) {
+                 kernel_bridge_log("Kernel Bridge: Failed to join bridge thread: %s\n", strerror(errno));
+             }
              bridge_state.bridge_thread = 0;
          }
          
-         printf("Kernel Bridge: Stopped\n");
+         kernel_bridge_log("Kernel Bridge: Stopped\n");
      }
  }
  
@@ -310,11 +295,14 @@
      kernel_bridge_stop();
      
      if (bridge_state.kernel_fd >= 0) {
-         close(bridge_state.kernel_fd);
+         if (close(bridge_state.kernel_fd) != 0) {
+             kernel_bridge_log("Kernel Bridge: Failed to close kernel fd: %s\n", strerror(errno));
+         }
          bridge_state.kernel_fd = -1;
      }
-     
-     printf("Kernel Bridge: Cleaned up\n");
+     if (log_file && log_file != stderr) fclose(log_file);
+     log_file = NULL;
+     kernel_bridge_log("Kernel Bridge: Cleaned up\n");
  }
  
  /* Get pending request count */
@@ -351,8 +339,7 @@
      /* Create netlink socket */
      netlink_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_AI_OS);
      if (netlink_fd < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to create netlink socket: %s\n", 
-                 strerror(errno));
+         kernel_bridge_log("Kernel Bridge: Failed to create netlink socket: %s\n", strerror(errno));
          return -1;
      }
      
@@ -363,14 +350,13 @@
      src_addr.nl_groups = 0;
      
      if (bind(netlink_fd, (struct sockaddr *)&src_addr, sizeof(src_addr)) < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to bind netlink socket: %s\n", 
-                 strerror(errno));
+         kernel_bridge_log("Kernel Bridge: Failed to bind netlink socket: %s\n", strerror(errno));
          close(netlink_fd);
          netlink_fd = -1;
          return -1;
      }
      
-     printf("Kernel Bridge: Netlink communication initialized\n");
+     kernel_bridge_log("Kernel Bridge: Netlink communication initialized\n");
      return 0;
  }
  
@@ -383,6 +369,7 @@
      struct msghdr msgh;
      
      if (netlink_fd < 0) {
+         kernel_bridge_log("Kernel Bridge: send_netlink_response called with invalid fd\n");
          return -1;
      }
      
@@ -418,8 +405,7 @@
      
      /* Send message */
      if (sendmsg(netlink_fd, &msgh, 0) < 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to send netlink message: %s\n", 
-                 strerror(errno));
+         kernel_bridge_log("Kernel Bridge: Failed to send netlink message: %s\n", strerror(errno));
          return -1;
      }
      
@@ -435,6 +421,7 @@
      ssize_t len;
      
      if (netlink_fd < 0 || !request) {
+         kernel_bridge_log("Kernel Bridge: receive_netlink_request called with invalid fd or null request\n");
          return -1;
      }
      
@@ -456,8 +443,7 @@
          if (errno == EAGAIN || errno == EWOULDBLOCK) {
              return 0; /* No message available */
          }
-         fprintf(stderr, "Kernel Bridge: Failed to receive netlink message: %s\n", 
-                 strerror(errno));
+         kernel_bridge_log("Kernel Bridge: Failed to receive netlink message: %s\n", strerror(errno));
          return -1;
      }
      
@@ -484,7 +470,7 @@
      int result;
      int max_fd;
      
-     printf("Kernel Bridge: Enhanced bridge thread started\n");
+     kernel_bridge_log("Kernel Bridge: Enhanced bridge thread started\n");
      
      while (bridge_state.running) {
          /* Prepare file descriptor set */
@@ -508,7 +494,7 @@
          
          if (result < 0) {
              if (errno == EINTR) continue;
-             fprintf(stderr, "Kernel Bridge: Select error: %s\n", strerror(errno));
+             kernel_bridge_log("Kernel Bridge: Select error: %s\n", strerror(errno));
              break;
          }
          
@@ -534,7 +520,7 @@
          }
      }
      
-     printf("Kernel Bridge: Enhanced bridge thread terminated\n");
+     kernel_bridge_log("Kernel Bridge: Enhanced bridge thread terminated\n");
      return NULL;
  }
  
@@ -542,28 +528,28 @@
  int kernel_bridge_start_enhanced(void) {
      /* Initialize both proc and netlink interfaces */
      if (kernel_bridge_init() != 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to initialize proc interface\n");
+         kernel_bridge_log("Kernel Bridge: Failed to initialize proc interface\n");
      }
      
      if (kernel_bridge_init_netlink() != 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to initialize netlink interface\n");
+         kernel_bridge_log("Kernel Bridge: Failed to initialize netlink interface\n");
      }
      
      if (bridge_state.kernel_fd < 0 && netlink_fd < 0) {
-         fprintf(stderr, "Kernel Bridge: No communication interface available\n");
+         kernel_bridge_log("Kernel Bridge: No communication interface available\n");
          return -1;
      }
      
      bridge_state.running = 1;
      
      if (pthread_create(&bridge_state.bridge_thread, NULL, enhanced_bridge_thread_func, NULL) != 0) {
-         fprintf(stderr, "Kernel Bridge: Failed to create enhanced bridge thread: %s\n", 
+         kernel_bridge_log("Kernel Bridge: Failed to create enhanced bridge thread: %s\n", 
                  strerror(errno));
          bridge_state.running = 0;
          return -1;
      }
      
-     printf("Kernel Bridge: Enhanced bridge started successfully\n");
+     kernel_bridge_log("Kernel Bridge: Enhanced bridge started successfully\n");
      return 0;
  }
  
@@ -572,7 +558,13 @@
      kernel_bridge_cleanup();
      
      if (netlink_fd >= 0) {
-         close(netlink_fd);
+         if (close(netlink_fd) != 0) {
+             kernel_bridge_log("Kernel Bridge: Failed to close netlink fd: %s\n", strerror(errno));
+         }
          netlink_fd = -1;
      }
  }
+
+// TODO: Add signal handling for graceful shutdown
+// TODO: Add protocol validation and error escalation for repeated failures
+// TODO: Use atomic operations for bridge_state.running if accessed from multiple threads

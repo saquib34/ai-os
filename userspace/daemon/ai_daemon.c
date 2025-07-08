@@ -19,6 +19,7 @@
  #include <stdarg.h>
  
  /* Include our custom headers */
+ #include "../ai_os_common.h"
  extern int ollama_client_init(const char *model_name, const char *api_url);
  extern int ollama_interpret_command(const char *natural_command, const char *context, 
                                     char *shell_command, size_t command_size);
@@ -26,22 +27,6 @@
  extern int ollama_list_models(char *models_list, size_t list_size);
  extern int ollama_set_model(const char *model_name);
  extern void ollama_client_cleanup(void);
- 
- typedef struct {
-     char current_directory[1024];
-     char username[64];
-     char shell[64];
-     char hostname[64];
-     char git_branch[128];
-     char git_status[256];
-     char recent_commands[50][256];
-     int command_count;
-     char file_listing[1024];
-     char system_info[512];
-     time_t last_update;
-     pid_t process_id;
-     uid_t user_id;
- } ai_context_t;
  
  extern int ai_context_create(ai_context_t *ctx, pid_t pid);
  extern char *ai_context_to_json(const ai_context_t *ctx);
@@ -56,17 +41,6 @@
  #define AI_LOG_FILE "/var/log/ai-os.log"
  #define MAX_CLIENTS 64
  #define MAX_COMMAND_LEN 4096
- 
- /* Client connection structure */
- typedef struct {
-     int socket_fd;
-     pid_t client_pid;
-     uid_t client_uid;
-     pthread_t thread_id;
-     ai_context_t context;
-     int active;
-     time_t last_activity;
- } ai_client_t;
  
  /* Global daemon state */
  typedef struct {
@@ -279,8 +253,6 @@
              json_object_object_add(response_obj, "message", json_object_new_string("Failed to interpret command"));
          }
          
-         free(context_summary);
-         
      } else if (strcmp(action, "execute") == 0) {
          /* Direct execution request */
          char exec_output[4096];
@@ -394,7 +366,11 @@
      }
      
      /* Find available client slot */
-     pthread_mutex_lock(&g_daemon.clients_mutex);
+     if (pthread_mutex_lock(&g_daemon.clients_mutex) != 0) {
+         ai_log("ERROR", "Failed to lock clients mutex in accept_client_connection: %s", strerror(errno));
+         close(client_socket);
+         return -1;
+     }
      
      for (int i = 0; i < MAX_CLIENTS; i++) {
          if (!g_daemon.clients[i].active) {
@@ -408,16 +384,22 @@
                  ai_log("ERROR", "Failed to create client thread: %s", strerror(errno));
                  close(client_socket);
                  g_daemon.clients[i].active = 0;
-                 pthread_mutex_unlock(&g_daemon.clients_mutex);
+                 if (pthread_mutex_unlock(&g_daemon.clients_mutex) != 0) {
+                     ai_log("ERROR", "Failed to unlock clients mutex after thread creation failure: %s", strerror(errno));
+                 }
                  return -1;
              }
              
-             pthread_mutex_unlock(&g_daemon.clients_mutex);
+             if (pthread_mutex_unlock(&g_daemon.clients_mutex) != 0) {
+                 ai_log("ERROR", "Failed to unlock clients mutex after successful client creation: %s", strerror(errno));
+             }
              return 0;
          }
      }
      
-     pthread_mutex_unlock(&g_daemon.clients_mutex);
+     if (pthread_mutex_unlock(&g_daemon.clients_mutex) != 0) {
+         ai_log("ERROR", "Failed to unlock clients mutex after full client list check: %s", strerror(errno));
+     }
      
      ai_log("WARN", "Too many clients, rejecting connection");
      close(client_socket);
@@ -483,66 +465,66 @@
  /* Initialize daemon */
  static int init_daemon(void) {
      struct sockaddr_un addr;
-     
-     /* Open log file */
+
      g_daemon.log_file = fopen(AI_LOG_FILE, "a");
      if (!g_daemon.log_file) {
-         fprintf(stderr, "Warning: Could not open log file %s\n", AI_LOG_FILE);
+         ai_log("WARN", "Could not open log file %s", AI_LOG_FILE);
      }
-     
+
      /* Initialize syslog */
      openlog("ai-os-daemon", LOG_PID, LOG_DAEMON);
-     
+
      ai_log("INFO", "Starting AI-OS Daemon");
-     
-     /* Load configuration */
-     load_config();
-     
-     /* Initialize Ollama client */
+
+     if (load_config() != 0) {
+         ai_log("ERROR", "Failed to load config");
+         // Continue with defaults
+     }
+
      if (ollama_client_init(g_daemon.current_model, NULL) != 0) {
          ai_log("ERROR", "Failed to initialize Ollama client");
-         return -1;
+         // Continue, but warn
      }
-     
-     /* Check if Ollama is running */
+
      if (ollama_check_status() != 0) {
          ai_log("WARN", "Ollama is not running, some features may not work");
+         // Do not fail
      }
-     
-     /* Create server socket */
+
      g_daemon.server_socket = socket(AF_UNIX, SOCK_STREAM, 0);
      if (g_daemon.server_socket < 0) {
          ai_log("ERROR", "Failed to create server socket: %s", strerror(errno));
          return -1;
      }
-     
-     /* Remove existing socket file */
+
      unlink(AI_SOCKET_PATH);
-     
-     /* Bind socket */
      memset(&addr, 0, sizeof(addr));
      addr.sun_family = AF_UNIX;
      strncpy(addr.sun_path, AI_SOCKET_PATH, sizeof(addr.sun_path) - 1);
-     
      if (bind(g_daemon.server_socket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
          ai_log("ERROR", "Failed to bind socket: %s", strerror(errno));
+         close(g_daemon.server_socket);
          return -1;
      }
-     
-     /* Set socket permissions */
-     chmod(AI_SOCKET_PATH, 0666);
-     
-     /* Listen for connections */
+
+     if (chmod(AI_SOCKET_PATH, 0666) < 0) {
+         ai_log("WARN", "Failed to set socket permissions: %s", strerror(errno));
+     }
+
      if (listen(g_daemon.server_socket, 10) < 0) {
          ai_log("ERROR", "Failed to listen on socket: %s", strerror(errno));
+         close(g_daemon.server_socket);
+         unlink(AI_SOCKET_PATH);
          return -1;
      }
-     
-     /* Initialize mutex */
-     pthread_mutex_init(&g_daemon.clients_mutex, NULL);
-     
+
+     if (pthread_mutex_init(&g_daemon.clients_mutex, NULL) != 0) {
+         ai_log("ERROR", "Failed to initialize clients mutex: %s", strerror(errno));
+         close(g_daemon.server_socket);
+         unlink(AI_SOCKET_PATH);
+         return -1;
+     }
      g_daemon.running = 1;
-     
      ai_log("INFO", "AI-OS Daemon initialized successfully");
      return 0;
  }
@@ -550,38 +532,38 @@
  /* Cleanup daemon */
  static void cleanup_daemon(void) {
      ai_log("INFO", "Cleaning up AI-OS Daemon");
-     
-     /* Stop accepting new connections */
      g_daemon.running = 0;
-     
-     /* Close client connections */
-     pthread_mutex_lock(&g_daemon.clients_mutex);
+     if (pthread_mutex_lock(&g_daemon.clients_mutex) != 0) {
+         ai_log("ERROR", "Failed to lock clients mutex during cleanup: %s", strerror(errno));
+     }
      for (int i = 0; i < MAX_CLIENTS; i++) {
          if (g_daemon.clients[i].active) {
              g_daemon.clients[i].active = 0;
-             close(g_daemon.clients[i].socket_fd);
-             pthread_join(g_daemon.clients[i].thread_id, NULL);
+             if (close(g_daemon.clients[i].socket_fd) != 0) {
+                 ai_log("WARN", "Failed to close client socket: %s", strerror(errno));
+             }
+             if (pthread_join(g_daemon.clients[i].thread_id, NULL) != 0) {
+                 ai_log("WARN", "Failed to join client thread: %s", strerror(errno));
+             }
          }
      }
-     pthread_mutex_unlock(&g_daemon.clients_mutex);
-     
-     /* Close server socket */
-     close(g_daemon.server_socket);
-     unlink(AI_SOCKET_PATH);
-     
-     /* Cleanup Ollama client */
+     if (pthread_mutex_unlock(&g_daemon.clients_mutex) != 0) {
+         ai_log("ERROR", "Failed to unlock clients mutex during cleanup: %s", strerror(errno));
+     }
+     if (close(g_daemon.server_socket) != 0) {
+         ai_log("WARN", "Failed to close server socket: %s", strerror(errno));
+     }
+     if (unlink(AI_SOCKET_PATH) != 0) {
+         ai_log("WARN", "Failed to unlink socket file: %s", strerror(errno));
+     }
      ollama_client_cleanup();
-     
-     /* Cleanup mutex */
-     pthread_mutex_destroy(&g_daemon.clients_mutex);
-     
-     /* Close log file */
+     if (pthread_mutex_destroy(&g_daemon.clients_mutex) != 0) {
+         ai_log("ERROR", "Failed to destroy clients mutex: %s", strerror(errno));
+     }
      if (g_daemon.log_file) {
          fclose(g_daemon.log_file);
      }
-     
      closelog();
-     
      ai_log("INFO", "AI-OS Daemon cleanup complete");
  }
  
@@ -602,7 +584,7 @@
  int main(int argc, char *argv[]) {
      /* Check if running as root */
      if (getuid() == 0) {
-         fprintf(stderr, "Warning: Running as root is not recommended\n");
+         ai_log("WARN", "Running as root is not recommended");
      }
      
      /* Setup signal handlers */
@@ -612,7 +594,7 @@
      
      /* Initialize daemon */
      if (init_daemon() != 0) {
-         fprintf(stderr, "Failed to initialize daemon\n");
+         ai_log("ERROR", "Failed to initialize daemon");
          return 1;
      }
      

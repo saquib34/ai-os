@@ -11,74 +11,26 @@ AI-OS is a natural language shell assistant for Linux. Type commands in plain En
 
 ## Installation
 
-### 1. Install Dependencies
-
-**Arch Linux:**
-```bash
-sudo pacman -Syu --noconfirm
-sudo pacman -S --noconfirm base-devel linux-headers dbus json-c curl cmake git wget python systemd dkms gnu-netcat lsof
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install -y build-essential linux-headers-\$(uname -r) libdbus-1-dev libjson-c-dev libcurl4-openssl-dev cmake git wget curl python3-dev pkg-config systemd dkms
-```
-
-### 2. Install Ollama
+**All you need is the installer script!**
 
 ```bash
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama serve &
-ollama pull phi3:mini
-ollama pull codellama:7b-instruct
-```
-
-### 3. Build AI-OS
-
-```bash
+# Clone the repository (if you haven't already)
 git clone https://github.com/saquib34/ai-os.git
 cd ai-os
-make clean
-make all
+
+# Run the installer (it will handle everything for you)
+./scripts/install-ai-os.sh
 ```
 
-### 4. Install Binaries and Shell Integration
+- The installer will:
+  - Detect your Linux distribution and install all dependencies
+  - Install and configure Ollama (AI backend)
+  - Automatically select the best model for your available RAM (uses a smaller model if you have less than 6GB)
+  - Build and install all AI-OS components
+  - Set up config files, permissions, logging, and shell integration
+  - Start the daemon and verify everything is working
 
-```bash
-sudo cp build/ai-os-daemon /usr/local/sbin/
-sudo cp build/ai-client /usr/local/bin/
-sudo chmod +x /usr/local/sbin/ai-os-daemon /usr/local/bin/ai-client
-
-sudo mkdir -p /usr/local/share/ai-os/shell
-sudo cp userspace/shell-integration/ai-shell.sh /usr/local/share/ai-os/shell/
-sudo chmod +x /usr/local/share/ai-os/shell/ai-shell.sh
-echo source /usr/local/share/ai-os/shell/ai-shell.sh >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 5. Set Up and Start the Daemon
-
-```bash
-sudo tee /etc/systemd/system/ai-os.service > /dev/null <<EOF
-[Unit]
-Description=AI Operating System Daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/ai-os-daemon
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable ai-os
-sudo systemctl start ai-os
-```
+**No need to manually install dependencies, models, or configure anything!**
 
 ## Usage
 
@@ -87,14 +39,24 @@ sudo systemctl start ai-os
 
 ## Uninstall
 
+You can uninstall AI-OS using the script:
+
+```bash
+./scripts/install-ai-os.sh uninstall
+```
+
+Or manually:
 ```bash
 sudo systemctl stop ai-os
 sudo systemctl disable ai-os
 sudo rm -f /usr/local/sbin/ai-os-daemon /usr/local/bin/ai-client
 sudo rm -rf /usr/local/share/ai-os
 sudo rm -f /etc/systemd/system/ai-os.service
-sudo rm -rf /etc/ai-os /var/log/ai-os.log
+sudo rm -rf /etc/ai-os /var/log/ai-os
+sudo rm -f /lib/modules/$(uname -r)/extra/ai_os.ko
+sudo rm -f /etc/logrotate.d/ai-os
 sed -i /ai-shell.sh/d ~/.bashrc
+sudo systemctl daemon-reload
 hash -r
 ```
 

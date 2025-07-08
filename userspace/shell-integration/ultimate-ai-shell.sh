@@ -2,6 +2,17 @@
 # Ultimate AI Shell - Zero-Prefix Natural Language System
 # File: userspace/shell-integration/ultimate-ai-shell.sh
 
+LOG_FILE="/var/log/ai-os/ultimate-ai-shell.log"
+LOG_MAX_SIZE=$((1024 * 1024)) # 1MB
+
+log_msg() {
+    # Rotate log if needed
+    if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]; then
+        mv "$LOG_FILE" "$LOG_FILE.old"
+    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+}
+
 # This is the most advanced system that understands virtually any natural language
 
 # Ultimate configuration

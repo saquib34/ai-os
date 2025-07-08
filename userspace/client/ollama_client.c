@@ -10,6 +10,49 @@
  #include <json-c/json.h>
  #include <unistd.h>
  #include <pthread.h>
+ #include <locale.h>
+ #include <langinfo.h>
+ #include <sys/utsname.h>
+ #include <sys/stat.h>
+ #include <stdarg.h>
+ #include <time.h>
+ #include "../ai_os_common.h"
+ 
+ #define OLLAMA_CLIENT_LOG_FILE "/var/log/ai-os/ollama_client.log"
+ #define OLLAMA_CLIENT_LOG_MAX_SIZE (1024 * 1024) // 1MB
+
+ // Function to get Linux distribution and config
+static void get_linux_distribution(char *distro, size_t size, char *config, size_t config_size) {
+    FILE *f = fopen("/etc/os-release", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "PRETTY_NAME=", 12) == 0) {
+                char *val = strchr(line, '=');
+                if (val) {
+                    val++;
+                    if (*val == '"') val++;
+                    char *end = strchr(val, '"');
+                    if (end) *end = '\0';
+                    strncpy(distro, val, size-1);
+                    distro[size-1] = '\0';
+                }
+            }
+        }
+        fclose(f);
+    } else {
+        strncpy(distro, "Unknown Linux", size-1);
+        distro[size-1] = '\0';
+    }
+    // Get kernel version and architecture
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(config, config_size, "Kernel: %s, Arch: %s", uts.release, uts.machine);
+    } else {
+        strncpy(config, "Unknown config", config_size-1);
+        config[config_size-1] = '\0';
+    }
+}
  
  #define OLLAMA_API_URL "http://localhost:11434/api"
  #define MAX_RESPONSE_SIZE 8192
@@ -56,9 +99,41 @@
      return real_size;
  }
  
+ static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Log rotation utility */
+static void ollama_client_rotate_log() {
+    struct stat st;
+    if (stat(OLLAMA_CLIENT_LOG_FILE, &st) == 0 && st.st_size > OLLAMA_CLIENT_LOG_MAX_SIZE) {
+        char rotated[512];
+        snprintf(rotated, sizeof(rotated), "%s.old", OLLAMA_CLIENT_LOG_FILE);
+        rename(OLLAMA_CLIENT_LOG_FILE, rotated);
+    }
+}
+
+/* Logging utility with mutex and rotation */
+static FILE *log_file = NULL;
+static void ollama_client_log(const char *fmt, ...) {
+    pthread_mutex_lock(&log_mutex);
+    ollama_client_rotate_log();
+    if (!log_file) {
+        log_file = fopen(OLLAMA_CLIENT_LOG_FILE, "a");
+        if (!log_file) log_file = stderr;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(log_file, fmt, args);
+    fflush(log_file);
+    va_end(args);
+    pthread_mutex_unlock(&log_mutex);
+}
+
  /* Initialize Ollama client */
  int ollama_client_init(const char *model_name, const char *api_url) {
-     pthread_mutex_init(&g_client.mutex, NULL);
+     if (pthread_mutex_init(&g_client.mutex, NULL) != 0) {
+         ollama_client_log("Ollama Client: Failed to initialize mutex\n");
+         return -1;
+     }
      
      /* Set default values */
      strncpy(g_client.model_name, model_name ? model_name : "codellama:7b-instruct", sizeof(g_client.model_name) - 1);
@@ -72,7 +147,7 @@
      g_client.curl_handle = curl_easy_init();
      
      if (!g_client.curl_handle) {
-         fprintf(stderr, "Failed to initialize CURL\n");
+         ollama_client_log("Ollama Client: Failed to initialize CURL\n");
          return -1;
      }
      
@@ -80,31 +155,44 @@
      curl_easy_setopt(g_client.curl_handle, CURLOPT_TIMEOUT, g_client.timeout);
      curl_easy_setopt(g_client.curl_handle, CURLOPT_WRITEFUNCTION, write_callback);
      
-     printf("Ollama client initialized with model: %s\n", g_client.model_name);
+     ollama_client_log("Ollama client initialized with model: %s\n", g_client.model_name);
      return 0;
  }
  
+ /* Add a simple language detection stub (could be replaced with a real library) */
+static const char *detect_language(const char *text) {
+    // For demo: if contains non-ASCII, assume Spanish; else English
+    for (const char *p = text; *p; ++p) {
+        if ((unsigned char)*p > 127) return "Spanish";
+    }
+    return "English";
+}
+ 
  /* Create system prompt for command interpretation */
- static char *create_system_prompt(const char *context) {
-     static char system_prompt[2048];
-     
+ static char *create_system_prompt(const char *context, const char *language) {
+     static char system_prompt[4096];
+     char distro[128] = "", config[128] = "";
+     get_linux_distribution(distro, sizeof(distro), config, sizeof(config));
      snprintf(system_prompt, sizeof(system_prompt),
-         "You are an AI assistant that translates natural language commands into Linux shell commands. "
+         "You are an AI assistant that translates natural language commands into Linux shell commands.\n"
+         "Input language: %s\n"
+         "Linux distribution: %s\n"
+         "System configuration: %s\n"
          "Rules:\n"
          "1. Only output the shell command, no explanations\n"
          "2. If unsafe, output 'UNSAFE_COMMAND'\n"
          "3. If unclear, output 'UNCLEAR_COMMAND'\n"
          "4. Consider the context: %s\n"
-         "5. Be precise and safe\n\n"
+         "5. Reply in the same language as the input\n\n"
          "Examples:\n"
          "Input: 'git push and add all files'\n"
          "Output: git add . && git push\n\n"
-         "Input: 'install python package numpy'\n"
-         "Output: pip install numpy\n\n"
-         "Input: 'list files in current directory'\n"
-         "Output: ls -la\n\n",
+         "Input: 'instala el paquete python numpy'\n"
+         "Output: pip install numpy\n\n",
+         language ? language : "English",
+         distro,
+         config,
          context ? context : "Current directory, standard user permissions");
-     
      return system_prompt;
  }
  
@@ -121,7 +209,8 @@
      /* Create JSON request */
      json_object *request = json_object_new_object();
      json_object *model = json_object_new_string(g_client.model_name);
-     json_object *system_prompt = json_object_new_string(create_system_prompt(context));
+     const char *language = detect_language(prompt);
+     json_object *system_prompt = json_object_new_string(create_system_prompt(context, language));
      json_object *user_prompt = json_object_new_string(prompt);
      json_object *stream = json_object_new_boolean(0);
      json_object *options = json_object_new_object();
@@ -150,16 +239,27 @@
      curl_easy_setopt(g_client.curl_handle, CURLOPT_POSTFIELDS, json_string);
      curl_easy_setopt(g_client.curl_handle, CURLOPT_HTTPHEADER, headers);
      curl_easy_setopt(g_client.curl_handle, CURLOPT_WRITEDATA, &http_response);
-     
-     /* Perform the request */
-     CURLcode res = curl_easy_perform(g_client.curl_handle);
+     curl_easy_setopt(g_client.curl_handle, CURLOPT_TIMEOUT, 15L); // HTTP timeout
+     int max_attempts = 5;
+     int attempt = 0;
+     int backoff = 1;
+     CURLcode res = CURLE_OK;
+     while (attempt < max_attempts) {
+         res = curl_easy_perform(g_client.curl_handle);
+         if (res == CURLE_OK) break;
+         ollama_client_log("Ollama Client: CURL error (attempt %d): %s\n", attempt + 1, curl_easy_strerror(res));
+         sleep(backoff);
+         backoff *= 2;
+         if (backoff > 16) backoff = 16;
+         attempt++;
+     }
      
      /* Cleanup */
      curl_slist_free_all(headers);
      json_object_put(request);
      
      if (res != CURLE_OK) {
-         fprintf(stderr, "CURL error: %s\n", curl_easy_strerror(res));
+         ollama_client_log("Ollama Client: CURL error after %d attempts: %s\n", attempt, curl_easy_strerror(res));
          free(http_response.data);
          return -1;
      }
@@ -167,7 +267,7 @@
      /* Parse response */
      json_object *response_obj = json_tokener_parse(http_response.data);
      if (!response_obj) {
-         fprintf(stderr, "Failed to parse JSON response\n");
+         ollama_client_log("Ollama Client: Failed to parse JSON response\n");
          free(http_response.data);
          return -1;
      }
@@ -200,9 +300,15 @@
          return -1;
      }
      
-     pthread_mutex_lock(&g_client.mutex);
+     struct timespec mutex_timeout;
+     clock_gettime(CLOCK_REALTIME, &mutex_timeout);
+     mutex_timeout.tv_sec += 5; // 5 second timeout for mutex
+     if (pthread_mutex_timedlock(&g_client.mutex, &mutex_timeout) != 0) {
+         ollama_client_log("Ollama Client: Timed out waiting for mutex in interpret_command\n");
+         return -1;
+     }
      
-     printf("AI-OS: Interpreting '%s' with context '%s'\n", 
+     ollama_client_log("AI-OS: Interpreting '%s' with context '%s'\n", 
             natural_command, context ? context : "none");
      
      int result = send_ollama_request(natural_command, context, shell_command, command_size);
@@ -210,7 +316,7 @@
      pthread_mutex_unlock(&g_client.mutex);
      
      if (result == 0) {
-         printf("AI-OS: Interpreted as '%s'\n", shell_command);
+         ollama_client_log("AI-OS: Interpreted as '%s'\n", shell_command);
          
          /* Check for safety markers */
          if (strstr(shell_command, "UNSAFE_COMMAND")) {
@@ -308,11 +414,18 @@
  int ollama_set_model(const char *model_name) {
      if (!model_name) return -1;
      
-     pthread_mutex_lock(&g_client.mutex);
+     struct timespec mutex_timeout;
+     clock_gettime(CLOCK_REALTIME, &mutex_timeout);
+     mutex_timeout.tv_sec += 5;
+     if (pthread_mutex_timedlock(&g_client.mutex, &mutex_timeout) != 0) {
+         ollama_client_log("Ollama Client: Timed out waiting for mutex in set_model\n");
+         return -1;
+     }
+     
      strncpy(g_client.model_name, model_name, sizeof(g_client.model_name) - 1);
      pthread_mutex_unlock(&g_client.mutex);
      
-     printf("AI-OS: Switched to model '%s'\n", model_name);
+     ollama_client_log("AI-OS: Switched to model '%s'\n", model_name);
      return 0;
  }
  
@@ -323,6 +436,9 @@
      }
      curl_global_cleanup();
      pthread_mutex_destroy(&g_client.mutex);
-     
-     printf("AI-OS: Ollama client cleaned up\n");
+     ollama_client_log("AI-OS: Ollama client cleaned up\n");
+     pthread_mutex_lock(&log_mutex);
+     if (log_file && log_file != stderr) fclose(log_file);
+     log_file = NULL;
+     pthread_mutex_unlock(&log_mutex);
  }

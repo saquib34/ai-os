@@ -2,7 +2,16 @@
 # Direct Natural Language Shell Integration
 # File: userspace/shell-integration/direct-ai-shell.sh
 
-# This enables direct natural language commands without "ai" prefix
+LOG_FILE="/var/log/ai-os/direct-ai-shell.log"
+LOG_MAX_SIZE=$((1024 * 1024)) # 1MB
+
+log_msg() {
+    # Rotate log if needed
+    if [ -f "$LOG_FILE" ] && [ $(stat -c%s "$LOG_FILE") -gt $LOG_MAX_SIZE ]; then
+        mv "$LOG_FILE" "$LOG_FILE.old"
+    fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+}
 
 AI_OS_DIRECT_MODE=1
 AI_OS_THRESHOLD=3  # Minimum words to trigger AI interpretation
@@ -11,22 +20,18 @@ AI_OS_THRESHOLD=3  # Minimum words to trigger AI interpretation
 is_natural_language() {
     local cmd="$1"
     local word_count=$(echo "$cmd" | wc -w)
-    
     # Must have at least 3 words
     if [ $word_count -lt $AI_OS_THRESHOLD ]; then
         return 1
     fi
-    
     # Check for natural language patterns
     if [[ "$cmd" =~ (and|then|with|using|all|show|list|create|install|download|check) ]]; then
         return 0
     fi
-    
     # Check for common natural phrases
     if [[ "$cmd" =~ "files in"|"running processes"|"disk space"|"memory usage"|"git status" ]]; then
         return 0
     fi
-    
     return 1
 }
 
@@ -36,22 +41,21 @@ command_not_found_handle() {
     shift
     local args="$*"
     local full_command="$command $args"
-    
     # Check if this looks like natural language
     if is_natural_language "$full_command"; then
         echo "🤖 Interpreting: $full_command"
-        
+        log_msg "Interpreting: $full_command (command_not_found_handle)"
         # Get interpretation from AI
         local interpreted
         interpreted=$(ai-client interpret "$full_command" 2>/dev/null)
         local result=$?
-        
         if [ $result -eq 0 ] && [ -n "$interpreted" ]; then
             echo "💡 Interpreted as: $interpreted"
-            
+            log_msg "Interpreted: $full_command -> $interpreted"
             # Auto-execute or ask for confirmation
             if [ "$AI_OS_AUTO_EXECUTE" = "1" ]; then
                 echo "⚡ Executing..."
+                log_msg "Auto-executing: $interpreted"
                 eval "$interpreted"
             else
                 echo -n "🚀 Execute this command? [Y/n] "
@@ -59,8 +63,10 @@ command_not_found_handle() {
                 case $response in
                     [nN]|[nN][oO])
                         echo "❌ Cancelled"
+                        log_msg "User cancelled execution for: $interpreted"
                         ;;
                     *)
+                        log_msg "User confirmed execution for: $interpreted"
                         eval "$interpreted"
                         ;;
                 esac
@@ -69,13 +75,14 @@ command_not_found_handle() {
         else
             echo "❓ Could not interpret natural language command"
             echo "💭 Try: ai \"$full_command\""
+            log_msg "Failed to interpret: $full_command"
         fi
     else
         # Fall back to standard error
         echo "bash: $command: command not found"
         echo "💡 Tip: Use natural language (3+ words) for AI interpretation"
+        log_msg "Command not found: $command (not interpreted)"
     fi
-    
     return 127
 }
 
@@ -85,19 +92,18 @@ command_not_found_handler() {
     shift
     local args="$*"
     local full_command="$command $args"
-    
     if is_natural_language "$full_command"; then
         echo "🤖 Interpreting: $full_command"
-        
+        log_msg "Interpreting: $full_command (command_not_found_handler)"
         local interpreted
         interpreted=$(ai-client interpret "$full_command" 2>/dev/null)
         local result=$?
-        
         if [ $result -eq 0 ] && [ -n "$interpreted" ]; then
             echo "💡 Interpreted as: $interpreted"
-            
+            log_msg "Interpreted: $full_command -> $interpreted"
             if [ "$AI_OS_AUTO_EXECUTE" = "1" ]; then
                 echo "⚡ Executing..."
+                log_msg "Auto-executing: $interpreted"
                 eval "$interpreted"
             else
                 echo -n "🚀 Execute this command? [Y/n] "
@@ -105,8 +111,10 @@ command_not_found_handler() {
                 case $response in
                     [nN]|[nN][oO])
                         echo "❌ Cancelled"
+                        log_msg "User cancelled execution for: $interpreted"
                         ;;
                     *)
+                        log_msg "User confirmed execution for: $interpreted"
                         eval "$interpreted"
                         ;;
                 esac
@@ -114,12 +122,13 @@ command_not_found_handler() {
             return $?
         else
             echo "❓ Could not interpret natural language command"
+            log_msg "Failed to interpret: $full_command"
         fi
     else
         echo "zsh: command not found: $command"
         echo "💡 Tip: Use natural language (3+ words) for AI interpretation"
+        log_msg "Command not found: $command (not interpreted)"
     fi
-    
     return 127
 }
 
@@ -127,31 +136,27 @@ command_not_found_handler() {
 if [ -n "$BASH_VERSION" ]; then
     ai_preexec_direct() {
         local cmd="$BASH_COMMAND"
-        
         # Skip if it's a built-in or existing command
         if command -v "$(echo "$cmd" | awk '{print $1}')" >/dev/null 2>&1; then
             return 0
         fi
-        
         # Skip if disabled
         if [ "$AI_OS_DIRECT_MODE" != "1" ]; then
             return 0
         fi
-        
         # Check if this looks like natural language
         if is_natural_language "$cmd"; then
             echo "🤖 Intercepting: $cmd"
-            
+            log_msg "Intercepting: $cmd (bash preexec)"
             local interpreted
             interpreted=$(ai-client interpret "$cmd" 2>/dev/null)
             local result=$?
-            
             if [ $result -eq 0 ] && [ -n "$interpreted" ]; then
                 echo "💡 Interpreted as: $interpreted"
-                
+                log_msg "Interpreted: $cmd -> $interpreted"
                 if [ "$AI_OS_AUTO_EXECUTE" = "1" ]; then
                     echo "⚡ Auto-executing..."
-                    # Replace the current command
+                    log_msg "Auto-executing: $interpreted"
                     history -s "$interpreted"
                     eval "$interpreted"
                     return 130  # Interrupt original command
@@ -161,9 +166,10 @@ if [ -n "$BASH_VERSION" ]; then
                     case $response in
                         [nN]|[nN][oO])
                             echo "❌ Using original command"
+                            log_msg "User chose original command over interpreted."
                             ;;
                         *)
-                            # Replace the command
+                            log_msg "User confirmed execution for: $interpreted (bash preexec)"
                             history -s "$interpreted"
                             eval "$interpreted"
                             return 130  # Interrupt original command
@@ -172,10 +178,8 @@ if [ -n "$BASH_VERSION" ]; then
                 fi
             fi
         fi
-        
         return 0
     }
-    
     # Enable the preexec hook
     trap 'ai_preexec_direct' DEBUG
 fi
@@ -183,32 +187,28 @@ fi
 # Zsh preexec hook
 if [ -n "$ZSH_VERSION" ]; then
     autoload -U add-zsh-hook
-    
     ai_preexec_zsh() {
         local cmd="$1"
-        
         # Skip if it's a built-in or existing command
         if command -v "$(echo "$cmd" | awk '{print $1}')" >/dev/null 2>&1; then
             return 0
         fi
-        
         # Skip if disabled
         if [ "$AI_OS_DIRECT_MODE" != "1" ]; then
             return 0
         fi
-        
         if is_natural_language "$cmd"; then
             echo "🤖 Intercepting: $cmd"
-            
+            log_msg "Intercepting: $cmd (zsh preexec)"
             local interpreted
             interpreted=$(ai-client interpret "$cmd" 2>/dev/null)
             local result=$?
-            
             if [ $result -eq 0 ] && [ -n "$interpreted" ]; then
                 echo "💡 Interpreted as: $interpreted"
-                
+                log_msg "Interpreted: $cmd -> $interpreted"
                 if [ "$AI_OS_AUTO_EXECUTE" = "1" ]; then
                     echo "⚡ Auto-executing..."
+                    log_msg "Auto-executing: $interpreted"
                     print -s "$interpreted"  # Add to history
                     eval "$interpreted"
                 else
@@ -217,8 +217,10 @@ if [ -n "$ZSH_VERSION" ]; then
                     case $response in
                         [nN]|[nN][oO])
                             echo "❌ Using original command"
+                            log_msg "User chose original command over interpreted."
                             ;;
                         *)
+                            log_msg "User confirmed execution for: $interpreted (zsh preexec)"
                             print -s "$interpreted"  # Add to history
                             eval "$interpreted"
                             ;;
@@ -227,7 +229,6 @@ if [ -n "$ZSH_VERSION" ]; then
             fi
         fi
     }
-    
     add-zsh-hook preexec ai_preexec_zsh
 fi
 
@@ -238,22 +239,24 @@ direct-ai-enable() {
     echo "💬 Now you can use natural language directly:"
     echo "   Example: show running processes"
     echo "   Example: git push and add all files"
+    log_msg "Direct AI mode enabled"
 }
-
 direct-ai-disable() {
     AI_OS_DIRECT_MODE=0
     echo "🔴 Direct AI mode disabled"
     echo "💬 Use 'ai \"command\"' for interpretation"
+    log_msg "Direct AI mode disabled"
 }
-
 direct-ai-auto-on() {
     AI_OS_AUTO_EXECUTE=1
     echo "⚡ Auto-execution enabled (be careful!)"
+    log_msg "Auto-execution enabled"
 }
 
 direct-ai-auto-off() {
     AI_OS_AUTO_EXECUTE=0
     echo "🛡️ Auto-execution disabled (confirmation required)"
+    log_msg "Auto-execution disabled"
 }
 
 direct-ai-status() {

@@ -15,8 +15,26 @@ NC='\033[0m' # No Color
 AI_OS_VERSION="1.0.0"
 INSTALL_PREFIX="/usr/local"
 CONFIG_DIR="/etc/ai-os"
-LOG_FILE="/tmp/ai-os-install.log"
+LOG_FILE="/var/log/ai-os/install.log"
 BACKUP_DIR="/tmp/ai-os-backup-$(date +%Y%m%d-%H%M%S)"
+
+# Ensure log directory exists before any logging
+sudo mkdir -p /var/log/ai-os
+sudo chown "$USER": /var/log/ai-os
+sudo chmod 755 /var/log/ai-os
+
+# Detect distro
+DISTRO_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+if [[ "$DISTRO_ID" == "arch" || "$DISTRO_ID" == "endeavouros" ]]; then
+    # Arch-based logic (pacman)
+    DISTRO_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+elif [[ "$DISTRO_ID" == "ubuntu" || "$DISTRO_ID" == "debian" ]]; then
+    # Debian/Ubuntu logic (apt)
+    DISTRO_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+else
+    echo "[ERROR] Unsupported distribution: $PRETTY_NAME ($DISTRO_ID)"
+    exit 1
+fi
 
 # Functions
 log() {
@@ -35,105 +53,120 @@ info() {
     echo -e "${BLUE}[INFO] $1${NC}" | tee -a "$LOG_FILE"
 }
 
-# Check if running as root
-check_root() {
-    if [[ $EUID -eq 0 ]]; then
-        warn "Running as root. This is not recommended for development."
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+# Check for sudo/root
+check_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        if ! command -v sudo >/dev/null 2>&1; then
+            echo -e "${RED}This script requires root or sudo privileges.${NC}"
             exit 1
         fi
     fi
 }
 
-# Check system requirements
+# Check system requirements (cross-distro)
 check_requirements() {
     log "Checking system requirements..."
-    
-    # Check OS
-    if ! command -v apt >/dev/null 2>&1; then
-        error "This script requires a Debian/Ubuntu-based system"
-        exit 1
-    fi
-    
     # Check kernel version
     KERNEL_VERSION=$(uname -r)
     KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
     KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-    
     if [[ $KERNEL_MAJOR -lt 5 ]] || [[ $KERNEL_MAJOR -eq 5 && $KERNEL_MINOR -lt 4 ]]; then
         error "Kernel version 5.4+ required. Current: $KERNEL_VERSION"
         exit 1
     fi
-    
     # Check available memory
     TOTAL_MEM=$(free -m | awk 'NR==2{print $2}')
     if [[ $TOTAL_MEM -lt 4096 ]]; then
         warn "Low memory detected: ${TOTAL_MEM}MB. Recommended: 4GB+"
     fi
-    
     # Check disk space
     AVAILABLE_SPACE=$(df / | awk 'NR==2 {print $4}')
     if [[ $AVAILABLE_SPACE -lt 10485760 ]]; then  # 10GB in KB
         warn "Low disk space. Recommended: 10GB+ free"
     fi
-    
     log "System requirements check completed"
 }
 
-# Install system dependencies
+# Install system dependencies (cross-distro)
 install_dependencies() {
-    log "Installing system dependencies..."
-    
-    sudo apt update
-    sudo apt install -y \
-        build-essential \
-        linux-headers-$(uname -r) \
-        libdbus-1-dev \
-        libjson-c-dev \
-        libcurl4-openssl-dev \
-        cmake \
-        git \
-        wget \
-        curl \
-        python3-dev \
-        pkg-config \
-        systemd \
-        dkms \
-        module-assistant \
-        debhelper \
-        || { error "Failed to install dependencies"; exit 1; }
-    
+    log "Installing system dependencies for $DISTRO_NAME..."
+    if [[ "$DISTRO_ID" == "ubuntu" || "$DISTRO_ID" == "debian" ]]; then
+        sudo apt update
+        sudo apt install -y \
+            build-essential \
+            linux-headers-$(uname -r) \
+            libdbus-1-dev \
+            libjson-c-dev \
+            libcurl4-openssl-dev \
+            cmake \
+            git \
+            wget \
+            curl \
+            python3-dev \
+            pkg-config \
+            systemd \
+            dkms \
+            module-assistant \
+            debhelper \
+            || { error "Failed to install dependencies"; exit 1; }
+    elif [[ "$DISTRO_ID" == "arch" || "$DISTRO_ID" == "endeavouros" ]]; then
+        sudo pacman -Sy --noconfirm \
+            base-devel \
+            linux-headers \
+            dbus \
+            json-c \
+            curl \
+            cmake \
+            git \
+            wget \
+            python \
+            pkgconf \
+            systemd \
+            dkms \
+            || { error "Failed to install dependencies"; exit 1; }
+    else
+        error "Unsupported distribution: $DISTRO_NAME ($DISTRO_ID)"
+        exit 1
+    fi
     log "Dependencies installed successfully"
 }
 
-# Install Ollama
+# Install Ollama (warn user, allow skip)
 install_ollama() {
     log "Installing Ollama..."
-    
     if command -v ollama >/dev/null 2>&1; then
         info "Ollama already installed"
         ollama --version
     else
+        echo -e "${YELLOW}Ollama will be installed from a remote script. This may be a security risk.${NC}"
+        read -p "Proceed with Ollama install? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            warn "Ollama install skipped by user."
+            return 0
+        fi
         curl -fsSL https://ollama.ai/install.sh | sh || {
             error "Failed to install Ollama"
             exit 1
         }
     fi
-    
     # Start Ollama service
     if ! pgrep ollama >/dev/null; then
         log "Starting Ollama service..."
         ollama serve &
         sleep 5
     fi
-    
-    # Pull required models
-    log "Downloading AI models (this may take several minutes)..."
-    ollama pull codellama:7b-instruct || warn "Failed to pull codellama model"
-    ollama pull phi3:mini || warn "Failed to pull phi3 model"
-    
+    # Model selection based on RAM
+    TOTAL_MEM=$(free -m | awk 'NR==2{print $2}')
+    if [[ $TOTAL_MEM -lt 6144 ]]; then
+        export AI_OS_MODEL="llama2:7b"
+        log "System memory is low (${TOTAL_MEM}MB). Using smaller model: $AI_OS_MODEL."
+        ollama pull "$AI_OS_MODEL" || warn "Failed to pull $AI_OS_MODEL model"
+    else
+        export AI_OS_MODEL="codellama:7b-instruct"
+        log "System memory is sufficient (${TOTAL_MEM}MB). Using default model: $AI_OS_MODEL."
+        ollama pull "$AI_OS_MODEL" || warn "Failed to pull $AI_OS_MODEL model"
+    fi
     # Verify models
     log "Available models:"
     ollama list
@@ -160,62 +193,8 @@ install_source_files() {
     log "Installing source files..."
     
     # Create header file for shared definitions
-    cat > userspace/ai_os_common.h << 'EOF'
-#ifndef AI_OS_COMMON_H
-#define AI_OS_COMMON_H
-
-#include <time.h>
-
-/* Process context structure */
-typedef struct {
-    char current_directory[1024];
-    char username[64];
-    char shell[64];
-    char hostname[64];
-    char git_branch[128];
-    char git_status[256];
-    char recent_commands[50][256];
-    int command_count;
-    char file_listing[1024];
-    char system_info[512];
-    time_t last_update;
-    pid_t process_id;
-    uid_t user_id;
-} ai_context_t;
-
-/* Function declarations */
-int ai_client_connect(void);
-void ai_client_disconnect(void);
-int ai_interpret_command(const char *natural_command, char *shell_command, size_t command_size);
-int ai_execute_command(const char *command, char *output, size_t output_size);
-int ai_get_status(char *status_info, size_t info_size);
-int ai_set_model(const char *model_name);
-int ai_get_context(char *context_info, size_t info_size);
-
-int ollama_client_init(const char *model_name, const char *api_url);
-int ollama_interpret_command(const char *natural_command, const char *context, 
-                            char *shell_command, size_t command_size);
-int ollama_check_status(void);
-int ollama_list_models(char *models_list, size_t list_size);
-int ollama_set_model(const char *model_name);
-void ollama_client_cleanup(void);
-
-int ai_context_create(ai_context_t *ctx, pid_t pid);
-char *ai_context_to_json(const ai_context_t *ctx);
-char *ai_context_to_summary(const ai_context_t *ctx);
-int ai_context_update(ai_context_t *ctx);
-int ai_context_add_command(ai_context_t *ctx, const char *command);
-int ai_context_needs_refresh(ai_context_t *ctx);
-void ai_context_free(ai_context_t *ctx);
-
-int kernel_bridge_init(void);
-int kernel_bridge_start(void);
-void kernel_bridge_stop(void);
-void kernel_bridge_cleanup(void);
-
-#endif /* AI_OS_COMMON_H */
-EOF
-
+    # This block is removed as the header is now maintained directly in the repo.
+    
     log "Source files prepared"
 }
 
@@ -263,11 +242,12 @@ install_components() {
 # Configure system
 configure_system() {
     log "Configuring AI-OS system..."
-    
+    # Use selected model from install_ollama
+    MODEL_TO_USE="${AI_OS_MODEL:-codellama:7b-instruct}"
     # Set up configuration file
     sudo tee "$CONFIG_DIR/config.json" > /dev/null << EOF
 {
-    "model": "codellama:7b-instruct",
+    "model": "$MODEL_TO_USE",
     "safety_mode": true,
     "confirmation_required": true,
     "api_url": "http://localhost:11434/api",
@@ -278,11 +258,9 @@ configure_system() {
     "debug_mode": false
 }
 EOF
-    
     # Set permissions
     sudo chmod 644 "$CONFIG_DIR/config.json"
     sudo chown root:root "$CONFIG_DIR/config.json"
-    
     # Create log rotation
     sudo tee /etc/logrotate.d/ai-os > /dev/null << EOF
 /var/log/ai-os.log {
@@ -295,7 +273,6 @@ EOF
     create 644 root root
 }
 EOF
-    
     log "System configuration completed"
 }
 
@@ -498,7 +475,7 @@ main_install() {
     log "Starting AI-OS Installation v$AI_OS_VERSION"
     
     # Pre-installation checks
-    check_root
+    check_sudo
     check_requirements
     
     # Create backup if existing installation
@@ -529,6 +506,9 @@ main_install() {
     echo "3. Check status: ai-status"
     echo "4. Get help: ai-help"
     echo ""
+    if [[ -n "$AI_OS_MODEL" ]]; then
+      echo "[INFO] Model set to: $AI_OS_MODEL (based on available RAM)"
+    fi
     echo "For more information, see the documentation."
 }
 

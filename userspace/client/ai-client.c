@@ -8,7 +8,11 @@
  #include <string.h>
  #include <unistd.h>
  #include <getopt.h>
- 
+ #include <sys/stat.h>
+ #include <stdarg.h>
+ #include <time.h>
+ #include <pthread.h>
+
  /* Include our client library functions */
  extern int ai_client_connect(void);
  extern void ai_client_disconnect(void);
@@ -20,6 +24,33 @@
  
  #define MAX_COMMAND_SIZE 4096
  #define MAX_OUTPUT_SIZE 8192
+ 
+ #define AI_CLIENT_CLI_LOG_FILE "/var/log/ai-os/ai_client_cli.log"
+ #define AI_CLIENT_CLI_LOG_MAX_SIZE (1024 * 1024) // 1MB
+ static pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static FILE *log_file = NULL;
+ static void ai_client_cli_rotate_log() {
+     struct stat st;
+     if (stat(AI_CLIENT_CLI_LOG_FILE, &st) == 0 && st.st_size > AI_CLIENT_CLI_LOG_MAX_SIZE) {
+         char rotated[512];
+         snprintf(rotated, sizeof(rotated), "%s.old", AI_CLIENT_CLI_LOG_FILE);
+         rename(AI_CLIENT_CLI_LOG_FILE, rotated);
+     }
+ }
+ static void ai_client_cli_log(const char *fmt, ...) {
+     pthread_mutex_lock(&log_mutex);
+     ai_client_cli_rotate_log();
+     if (!log_file) {
+         log_file = fopen(AI_CLIENT_CLI_LOG_FILE, "a");
+         if (!log_file) log_file = stderr;
+     }
+     va_list args;
+     va_start(args, fmt);
+     vfprintf(log_file, fmt, args);
+     fflush(log_file);
+     va_end(args);
+     pthread_mutex_unlock(&log_mutex);
+ }
  
  /* Print usage information */
  void print_usage(const char *program_name) {
@@ -63,6 +94,7 @@
          fflush(stdout);
          
          if (!fgets(input, sizeof(input), stdin)) {
+             ai_client_cli_log("Error: Failed to read input in interactive mode\n");
              break;
          }
          
@@ -94,6 +126,7 @@
              if (ai_get_status(output, sizeof(output)) == 0) {
                  printf("Status: %s\n", output);
              } else {
+                 ai_client_cli_log("Error: Failed to get status in interactive mode\n");
                  printf("Error: Failed to get status\n");
              }
              continue;
@@ -103,6 +136,7 @@
              if (ai_get_context(output, sizeof(output)) == 0) {
                  printf("Context: %s\n", output);
              } else {
+                 ai_client_cli_log("Error: Failed to get context in interactive mode\n");
                  printf("Error: Failed to get context\n");
              }
              continue;
@@ -160,14 +194,17 @@
                  break;
                  
              case -2:
+                 ai_client_cli_log("Error: Command marked as unsafe in interactive mode\n");
                  printf("Error: Command marked as unsafe\n");
                  break;
                  
              case -3:
+                 ai_client_cli_log("Error: Command unclear in interactive mode\n");
                  printf("Error: Command unclear, please rephrase\n");
                  break;
                  
              default:
+                 ai_client_cli_log("Error: Failed to interpret command in interactive mode\n");
                  printf("Error: Failed to interpret command\n");
                  break;
          }
@@ -226,7 +263,7 @@
      /* Check if we have a command */
      if (optind >= argc) {
          if (!quiet) {
-             fprintf(stderr, "Error: No command specified\n\n");
+             ai_client_cli_log("Error: No command specified\n");
              print_usage(argv[0]);
          }
          return 1;
@@ -235,8 +272,8 @@
      /* Connect to daemon */
      if (ai_client_connect() != 0) {
          if (!quiet) {
-             fprintf(stderr, "Error: Failed to connect to AI daemon\n");
-             fprintf(stderr, "Make sure the daemon is running: sudo systemctl start ai-os\n");
+             ai_client_cli_log("Error: Failed to connect to AI daemon\n");
+             ai_client_cli_log("Make sure the daemon is running: sudo systemctl start ai-os\n");
          }
          return 1;
      }
@@ -249,7 +286,7 @@
      
      if (strcmp(action, "interpret") == 0) {
          if (optind + 1 >= argc) {
-             fprintf(stderr, "Error: No command to interpret\n");
+             ai_client_cli_log("Error: No command to interpret\n");
              ai_client_disconnect();
              return 1;
          }
@@ -272,15 +309,15 @@
                      printf("%s\n", output);
                      break;
                  case -2:
-                     if (!quiet) fprintf(stderr, "Error: Command marked as unsafe\n");
+                     if (!quiet) ai_client_cli_log("Error: Command marked as unsafe\n");
                      result = 2;
                      break;
                  case -3:
-                     if (!quiet) fprintf(stderr, "Error: Command unclear\n");
+                     if (!quiet) ai_client_cli_log("Error: Command unclear\n");
                      result = 3;
                      break;
                  default:
-                     if (!quiet) fprintf(stderr, "Error: Failed to interpret command\n");
+                     if (!quiet) ai_client_cli_log("Error: Failed to interpret command\n");
                      result = 1;
                      break;
              }
@@ -288,7 +325,7 @@
          
      } else if (strcmp(action, "execute") == 0) {
          if (optind + 1 >= argc) {
-             fprintf(stderr, "Error: No command to execute\n");
+             ai_client_cli_log("Error: No command to execute\n");
              ai_client_disconnect();
              return 1;
          }
@@ -310,7 +347,7 @@
                  printf("%s", output);
              }
              if (exec_result != 0 && !quiet) {
-                 fprintf(stderr, "Command exited with code: %d\n", exec_result);
+                 ai_client_cli_log("Command exited with code: %d\n", exec_result);
              }
          }
          
@@ -320,7 +357,7 @@
          if (ai_get_status(output, sizeof(output)) == 0) {
              printf("%s\n", output);
          } else {
-             if (!quiet) fprintf(stderr, "Error: Failed to get status\n");
+             if (!quiet) ai_client_cli_log("Error: Failed to get status\n");
              result = 1;
          }
          
@@ -328,13 +365,13 @@
          if (ai_get_context(output, sizeof(output)) == 0) {
              printf("%s\n", output);
          } else {
-             if (!quiet) fprintf(stderr, "Error: Failed to get context\n");
+             if (!quiet) ai_client_cli_log("Error: Failed to get context\n");
              result = 1;
          }
          
      } else if (strcmp(action, "model") == 0) {
          if (optind + 1 >= argc) {
-             fprintf(stderr, "Error: No model name specified\n");
+             ai_client_cli_log("Error: No model name specified\n");
              ai_client_disconnect();
              return 1;
          }
@@ -343,7 +380,7 @@
          if (ai_set_model(model_name) == 0) {
              if (!quiet) printf("Model set to: %s\n", model_name);
          } else {
-             if (!quiet) fprintf(stderr, "Error: Failed to set model\n");
+             if (!quiet) ai_client_cli_log("Error: Failed to set model\n");
              result = 1;
          }
          
@@ -389,7 +426,7 @@
                              printf("%s", exec_output);
                          }
                          if (exec_result != 0 && verbose && !quiet) {
-                             fprintf(stderr, "Command exited with code: %d\n", exec_result);
+                             ai_client_cli_log("Command exited with code: %d\n", exec_result);
                          }
                      }
                      result = exec_result;
@@ -407,7 +444,7 @@
                  if (json_output) {
                      printf("{\"input\":\"%s\",\"error\":\"unsafe\",\"status\":-2}\n", command);
                  } else {
-                     if (!quiet) fprintf(stderr, "Error: Command marked as unsafe\n");
+                     if (!quiet) ai_client_cli_log("Error: Command marked as unsafe\n");
                  }
                  result = 2;
                  break;
@@ -416,7 +453,7 @@
                  if (json_output) {
                      printf("{\"input\":\"%s\",\"error\":\"unclear\",\"status\":-3}\n", command);
                  } else {
-                     if (!quiet) fprintf(stderr, "Error: Command unclear, please rephrase\n");
+                     if (!quiet) ai_client_cli_log("Error: Command unclear, please rephrase\n");
                  }
                  result = 3;
                  break;
@@ -426,8 +463,8 @@
                      printf("{\"input\":\"%s\",\"error\":\"interpretation_failed\",\"status\":-1}\n", command);
                  } else {
                      if (!quiet) {
-                         fprintf(stderr, "Error: Failed to interpret command\n");
-                         fprintf(stderr, "Available commands: interpret, execute, status, context, model, interactive, help\n");
+                         ai_client_cli_log("Error: Failed to interpret command\n");
+                         ai_client_cli_log("Available commands: interpret, execute, status, context, model, interactive, help\n");
                      }
                  }
                  result = 1;
@@ -437,5 +474,9 @@
      
      /* Cleanup */
      ai_client_disconnect();
+     pthread_mutex_lock(&log_mutex);
+     if (log_file && log_file != stderr) fclose(log_file);
+     log_file = NULL;
+     pthread_mutex_unlock(&log_mutex);
      return result;
  }
