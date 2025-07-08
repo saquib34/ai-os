@@ -33,8 +33,16 @@ sudo rm -rf /etc/ai-os /var/log/ai-os
 sudo rm -f /lib/modules/$(uname -r)/extra/ai_os.ko
 sudo rm -f /etc/logrotate.d/ai-os
 
-log "Removing shell integration from ~/.bashrc..."
-sed -i /ai-shell.sh/d ~/.bashrc || warn "Could not update ~/.bashrc"
+log "Removing shell integration from user shell config files..."
+for shellrc in ~/.bashrc ~/.bash_profile ~/.zshrc ~/.profile; do
+  if [ -f "$shellrc" ]; then
+    if grep -q 'ai-shell.sh' "$shellrc"; then
+      sed -i '/ai-shell.sh/d' "$shellrc" && \
+        log "Removed ai-shell.sh integration from $shellrc" || \
+        warn "Could not update $shellrc"
+    fi
+  fi
+done
 
 log "Reloading systemd daemon..."
 sudo systemctl daemon-reload
