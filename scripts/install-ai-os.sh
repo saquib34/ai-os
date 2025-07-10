@@ -23,6 +23,11 @@ sudo mkdir -p /var/log/ai-os
 sudo chown "$USER": /var/log/ai-os
 sudo chmod 755 /var/log/ai-os
 
+# Ensure ai-shell.log exists and is writable by the current user
+sudo touch /var/log/ai-os/ai-shell.log
+sudo chown "$USER":"$USER" /var/log/ai-os/ai-shell.log
+sudo chmod 664 /var/log/ai-os/ai-shell.log
+
 # Detect distro
 DISTRO_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
 if [[ "$DISTRO_ID" == "arch" || "$DISTRO_ID" == "endeavouros" ]]; then
