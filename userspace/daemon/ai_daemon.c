@@ -301,24 +301,56 @@
          /* Classify input as command or chat */
          ai_log("INFO", "Classifying input from PID %d: %s", client->client_pid, command);
          
-         /* Simple classification logic - can be enhanced */
+         /* Enhanced classification logic */
          const char *classification = "chat"; /* default */
          
-         /* Check for command-like patterns */
-         if (strstr(command, "list") || strstr(command, "show") || strstr(command, "find") ||
-             strstr(command, "create") || strstr(command, "delete") || strstr(command, "install") ||
-             strstr(command, "run") || strstr(command, "start") || strstr(command, "stop") ||
-             strstr(command, "check") || strstr(command, "get") || strstr(command, "set") ||
-             strstr(command, "copy") || strstr(command, "move") || strstr(command, "rename")) {
-             classification = "command";
+         /* Command action words - high priority */
+         const char *command_actions[] = {
+             "add", "commit", "push", "pull", "clone", "init", "status", "log", "branch", "checkout",
+             "merge", "rebase", "stash", "reset", "revert", "tag", "fetch", "remote", "config",
+             "list", "show", "find", "search", "grep", "cat", "head", "tail", "less", "more",
+             "create", "delete", "remove", "rm", "mkdir", "touch", "cp", "copy", "mv", "move",
+             "install", "uninstall", "update", "upgrade", "download", "wget", "curl", "scp", "rsync",
+             "run", "start", "stop", "restart", "kill", "pkill", "killall", "ps", "top", "htop",
+             "check", "test", "verify", "validate", "get", "set", "export", "import", "source",
+             "open", "close", "edit", "view", "read", "write", "save", "load", "backup", "restore",
+             "build", "compile", "make", "cmake", "configure", "install", "uninstall", "package",
+             "mount", "umount", "format", "partition", "fsck", "dd", "tar", "zip", "unzip",
+             "chmod", "chown", "chgrp", "umask", "sudo", "su", "whoami", "id", "groups",
+             "ping", "traceroute", "netstat", "ss", "iptables", "firewall", "ufw",
+             "docker", "podman", "kubectl", "helm", "terraform", "ansible",
+             "python", "pip", "node", "npm", "yarn", "cargo", "go", "java", "maven", "gradle",
+             NULL
+         };
+         
+         /* Chat/question words - lower priority */
+         const char *chat_words[] = {
+             "hello", "hi", "hey", "good morning", "good afternoon", "good evening",
+             "how are you", "how do you", "what is", "what are", "who is", "who are",
+             "when is", "when will", "where is", "where are", "why is", "why are",
+             "tell me", "explain", "describe", "define", "what does", "how does",
+             "joke", "funny", "humor", "weather", "time", "date", "temperature",
+             "thanks", "thank you", "appreciate", "help", "please", "could you",
+             "would you", "can you", "should I", "do you think", "what do you think",
+             NULL
+         };
+         
+         /* Check for command action words first (higher priority) */
+         for (int i = 0; command_actions[i] != NULL; i++) {
+             if (strstr(command, command_actions[i])) {
+                 classification = "command";
+                 break;
+             }
          }
          
-         /* Check for chat-like patterns */
-         if (strstr(command, "hello") || strstr(command, "hi") || strstr(command, "how are you") ||
-             strstr(command, "what") || strstr(command, "who") || strstr(command, "when") ||
-             strstr(command, "where") || strstr(command, "why") || strstr(command, "tell me") ||
-             strstr(command, "joke") || strstr(command, "weather") || strstr(command, "time")) {
-             classification = "chat";
+         /* Only check for chat words if no command action was found */
+         if (strcmp(classification, "command") != 0) {
+             for (int i = 0; chat_words[i] != NULL; i++) {
+                 if (strstr(command, chat_words[i])) {
+                     classification = "chat";
+                     break;
+                 }
+             }
          }
          
          json_object_object_add(response_obj, "classification", json_object_new_string(classification));
