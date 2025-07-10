@@ -1,1 +1,0 @@
-savedcmd_ai_os.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/lib/modules/6.15.5-arch1-1/build/scripts/module.lds -o ai_os.ko ai_os.o ai_os.mod.o .module-common.o

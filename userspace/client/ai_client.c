@@ -304,7 +304,7 @@ static ai_client_state_t g_client = {-1, 0};
      return success ? 0 : -1;
  }
  
- /* Get current context */
+ /* Get context from daemon */
  int ai_get_context(char *context_info, size_t info_size) {
      if (!context_info || info_size == 0) {
          return -1;
@@ -328,9 +328,86 @@ static ai_client_state_t g_client = {-1, 0};
          return -1;
      }
      
-     /* Copy response */
-     strncpy(context_info, response, info_size - 1);
-     context_info[info_size - 1] = '\0';
+     /* Parse response */
+     json_object *response_obj = json_tokener_parse(response);
+     if (!response_obj) {
+         ai_client_log("AI-Client: Invalid JSON response\n");
+         return -1;
+     }
      
-     return 0;
+     json_object *status_obj;
+     const char *status = "error";
+     
+     if (json_object_object_get_ex(response_obj, "status", &status_obj)) {
+         status = json_object_get_string(status_obj);
+     }
+     
+     if (strcmp(status, "success") == 0) {
+         /* Extract context information */
+         json_object *context_obj;
+         if (json_object_object_get_ex(response_obj, "context", &context_obj)) {
+             const char *context_str = json_object_to_json_string(context_obj);
+             strncpy(context_info, context_str, info_size - 1);
+             context_info[info_size - 1] = '\0';
+             json_object_put(response_obj);
+             return 0;
+         }
+     }
+     
+     json_object_put(response_obj);
+     return -1;
+ }
+ 
+ /* Classify input as command or chat */
+ int ai_classify_input(const char *input, char *classification, size_t classification_size) {
+     if (!input || !classification || classification_size == 0) {
+         return -1;
+     }
+     
+     /* Create JSON request */
+     json_object *request = json_object_new_object();
+     json_object *action = json_object_new_string("classify");
+     json_object *command = json_object_new_string(input);
+     
+     json_object_object_add(request, "action", action);
+     json_object_object_add(request, "command", command);
+     
+     const char *request_str = json_object_to_json_string(request);
+     
+     /* Send request */
+     char response[MAX_RESPONSE_SIZE];
+     int result = send_request(request_str, response, sizeof(response));
+     
+     json_object_put(request);
+     
+     if (result != 0) {
+         return -1;
+     }
+     
+     /* Parse response */
+     json_object *response_obj = json_tokener_parse(response);
+     if (!response_obj) {
+         ai_client_log("AI-Client: Invalid JSON response\n");
+         return -1;
+     }
+     
+     json_object *status_obj, *classification_obj;
+     const char *status = "error";
+     
+     if (json_object_object_get_ex(response_obj, "status", &status_obj)) {
+         status = json_object_get_string(status_obj);
+     }
+     
+     if (strcmp(status, "success") == 0) {
+         if (json_object_object_get_ex(response_obj, "classification", &classification_obj)) {
+             const char *class_result = json_object_get_string(classification_obj);
+             strncpy(classification, class_result, classification_size - 1);
+             classification[classification_size - 1] = '\0';
+             json_object_put(response_obj);
+             return 0;
+         }
+     }
+     
+     json_object_put(response_obj);
+     return -1;
  }

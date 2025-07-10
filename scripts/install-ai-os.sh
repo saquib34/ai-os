@@ -20,26 +20,18 @@ BACKUP_DIR="/tmp/ai-os-backup-$(date +%Y%m%d-%H%M%S)"
 
 # Ensure log directory exists before any logging
 sudo mkdir -p /var/log/ai-os
-sudo chown "$USER": /var/log/ai-os
+sudo chown $(logname): /var/log/ai-os
 sudo chmod 755 /var/log/ai-os
 
-# Ensure ai-shell.log exists and is writable by the current user
+# Ensure ai-shell.log exists and is writable by the installing user
 sudo touch /var/log/ai-os/ai-shell.log
-sudo chown "$USER":"$USER" /var/log/ai-os/ai-shell.log
+sudo chown $(logname):$(logname) /var/log/ai-os/ai-shell.log
 sudo chmod 664 /var/log/ai-os/ai-shell.log
 
-# Detect distro
+# Detect Linux distribution and version
 DISTRO_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
-if [[ "$DISTRO_ID" == "arch" || "$DISTRO_ID" == "endeavouros" ]]; then
-    # Arch-based logic (pacman)
-    DISTRO_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
-elif [[ "$DISTRO_ID" == "ubuntu" || "$DISTRO_ID" == "debian" ]]; then
-    # Debian/Ubuntu logic (apt)
-    DISTRO_NAME=$(grep '^NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
-else
-    echo "[ERROR] Unsupported distribution: $PRETTY_NAME ($DISTRO_ID)"
-    exit 1
-fi
+DISTRO_VERSION=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+DISTRO_NAME=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')
 
 # Functions
 log() {
@@ -247,20 +239,27 @@ install_components() {
 # Configure system
 configure_system() {
     log "Configuring AI-OS system..."
+    # Detect Linux distribution and version
+    DISTRO_ID=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    DISTRO_VERSION=$(grep '^VERSION_ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    DISTRO_NAME=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"')
     # Use selected model from install_ollama
     MODEL_TO_USE="${AI_OS_MODEL:-codellama:7b-instruct}"
     # Set up configuration file
     sudo tee "$CONFIG_DIR/config.json" > /dev/null << EOF
 {
     "model": "$MODEL_TO_USE",
-    "safety_mode": true,
-    "confirmation_required": true,
+    "safety_mode": false,
+    "confirmation_required": false,
     "api_url": "http://localhost:11434/api",
     "timeout": 30,
     "max_tokens": 512,
     "temperature": 0.1,
     "kernel_integration": true,
-    "debug_mode": false
+    "debug_mode": false,
+    "distro_id": "$DISTRO_ID",
+    "distro_version": "$DISTRO_VERSION",
+    "distro_name": "$DISTRO_NAME"
 }
 EOF
     # Set permissions
@@ -388,6 +387,15 @@ setup_shell_integration() {
     else
         warn "Shell config file not found: $shell_config"
     fi
+    
+    # Set up auto-execution by default
+    log "Setting up auto-execution by default..."
+    echo ""
+    echo "# AI-OS Auto-execution Setup" >> "$shell_config"
+    echo "# Enable auto-execution for true zero-prefix experience" >> "$shell_config"
+    echo "export AI_OS_AUTO_EXECUTE=1" >> "$shell_config"
+    echo "export AI_OS_ENABLED=1" >> "$shell_config"
+    echo "export AI_OS_CONFIRMATION=0" >> "$shell_config"
     
     log "Shell integration setup completed"
 }

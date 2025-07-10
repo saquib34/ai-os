@@ -12,6 +12,7 @@
  #include <stdarg.h>
  #include <time.h>
  #include <pthread.h>
+ #include <json-c/json.h>
 
  /* Include our client library functions */
  extern int ai_client_connect(void);
@@ -21,6 +22,7 @@
  extern int ai_get_status(char *status_info, size_t info_size);
  extern int ai_set_model(const char *model_name);
  extern int ai_get_context(char *context_info, size_t info_size);
+ extern int ai_classify_input(const char *input, char *classification, size_t classification_size);
  
  #define MAX_COMMAND_SIZE 4096
  #define MAX_OUTPUT_SIZE 8192
@@ -381,6 +383,68 @@
              if (!quiet) printf("Model set to: %s\n", model_name);
          } else {
              if (!quiet) ai_client_cli_log("Error: Failed to set model\n");
+             result = 1;
+         }
+         
+     } else if (strcmp(action, "classify") == 0) {
+         if (optind + 1 >= argc) {
+             ai_client_cli_log("Error: No input to classify\n");
+             ai_client_disconnect();
+             return 1;
+         }
+         
+         /* Join all remaining arguments as the input */
+         command[0] = '\0';
+         for (int i = optind + 1; i < argc; i++) {
+             if (i > optind + 1) strcat(command, " ");
+             strcat(command, argv[i]);
+         }
+         
+         /* Send classify request to daemon */
+         char classification[256];
+         int classify_result = ai_classify_input(command, classification, sizeof(classification));
+         
+         if (classify_result == 0) {
+             printf("%s\n", classification);
+         } else {
+             if (!quiet) ai_client_cli_log("Error: Failed to classify input\n");
+             result = 1;
+         }
+         
+     } else if (strcmp(action, "chat") == 0) {
+         if (optind + 1 >= argc) {
+             ai_client_cli_log("Error: No input for chat\n");
+             ai_client_disconnect();
+             return 1;
+         }
+         
+         /* Join all remaining arguments as the input */
+         command[0] = '\0';
+         for (int i = optind + 1; i < argc; i++) {
+             if (i > optind + 1) strcat(command, " ");
+             strcat(command, argv[i]);
+         }
+         
+         /* Send chat request to daemon */
+         char chat_response[1024];
+         int chat_result = ai_interpret_command(command, chat_response, sizeof(chat_response));
+         
+         if (chat_result == 0) {
+             /* Parse JSON response to extract chat_response */
+             json_object *response_obj = json_tokener_parse(chat_response);
+             if (response_obj) {
+                 json_object *chat_response_obj;
+                 if (json_object_object_get_ex(response_obj, "chat_response", &chat_response_obj)) {
+                     printf("%s\n", json_object_get_string(chat_response_obj));
+                 } else {
+                     printf("%s\n", chat_response);
+                 }
+                 json_object_put(response_obj);
+             } else {
+                 printf("%s\n", chat_response);
+             }
+         } else {
+             if (!quiet) ai_client_cli_log("Error: Failed to get chat response\n");
              result = 1;
          }
          

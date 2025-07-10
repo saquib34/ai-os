@@ -79,6 +79,42 @@ static void get_linux_distribution(char *distro, size_t size, char *config, size
  /* Global client instance */
  static ollama_client_t g_client = {0};
  
+ // Add global variables for distro info
+static char g_distro_id[64] = "";
+static char g_distro_version[64] = "";
+static char g_distro_name[128] = "";
+
+// Function to load distro info from config.json
+static void load_distro_info() {
+    FILE *f = fopen("/etc/ai-os/config.json", "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(len + 1);
+    if (!buf) { fclose(f); return; }
+    fread(buf, 1, len, f);
+    buf[len] = '\0';
+    fclose(f);
+    struct json_object *root = json_tokener_parse(buf);
+    free(buf);
+    if (!root) return;
+    struct json_object *id, *ver, *name;
+    if (json_object_object_get_ex(root, "distro_id", &id)) {
+        strncpy(g_distro_id, json_object_get_string(id), sizeof(g_distro_id)-1);
+        g_distro_id[sizeof(g_distro_id)-1] = '\0';
+    }
+    if (json_object_object_get_ex(root, "distro_version", &ver)) {
+        strncpy(g_distro_version, json_object_get_string(ver), sizeof(g_distro_version)-1);
+        g_distro_version[sizeof(g_distro_version)-1] = '\0';
+    }
+    if (json_object_object_get_ex(root, "distro_name", &name)) {
+        strncpy(g_distro_name, json_object_get_string(name), sizeof(g_distro_name)-1);
+        g_distro_name[sizeof(g_distro_name)-1] = '\0';
+    }
+    json_object_put(root);
+}
+ 
  /* Callback function to write HTTP response data */
  static size_t write_callback(void *contents, size_t size, size_t nmemb, struct ollama_response *response) {
      size_t real_size = size * nmemb;
@@ -171,13 +207,12 @@ static const char *detect_language(const char *text) {
  /* Create system prompt for command interpretation */
  static char *create_system_prompt(const char *context, const char *language) {
      static char system_prompt[4096];
-     char distro[128] = "", config[128] = "";
-     get_linux_distribution(distro, sizeof(distro), config, sizeof(config));
+     // Ensure distro info is loaded
+     if (g_distro_id[0] == '\0') load_distro_info();
      snprintf(system_prompt, sizeof(system_prompt),
          "You are an AI assistant that translates natural language commands into Linux shell commands.\n"
          "Input language: %s\n"
-         "Linux distribution: %s\n"
-         "System configuration: %s\n"
+         "Linux distribution: %s (%s, version %s)\n"
          "Rules:\n"
          "1. Only output the shell command, no explanations\n"
          "2. If unsafe, output 'UNSAFE_COMMAND'\n"
@@ -190,8 +225,9 @@ static const char *detect_language(const char *text) {
          "Input: 'instala el paquete python numpy'\n"
          "Output: pip install numpy\n\n",
          language ? language : "English",
-         distro,
-         config,
+         g_distro_name[0] ? g_distro_name : "Unknown Linux",
+         g_distro_id[0] ? g_distro_id : "unknown",
+         g_distro_version[0] ? g_distro_version : "unknown",
          context ? context : "Current directory, standard user permissions");
      return system_prompt;
  }
